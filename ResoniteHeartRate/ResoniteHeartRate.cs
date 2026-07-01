@@ -14,8 +14,8 @@ namespace ResoniteHeartRate {
     public class ResoniteHeartRate : ResoniteMod {
 
         public override string Name => "Resonite HeartRate";
-        public override string Author => "HamoCorp";
-        public override string Version => "1.0.4";
+        public override string Author => "HamoCorp (Dalek Fork)";
+        public override string Version => "1.1.3";
 
         public override string Link => "https://github.com/HamoCorp/ResoniteHeartRate";
 
@@ -49,6 +49,8 @@ namespace ResoniteHeartRate {
             updateValueStreamValues(0);
             _HR = null;
             _HypeRate = null;
+            _PulsoidWS?.Close();
+            _PulsoidWS = null;
 
             // Background reconnect logic
             Task.Run(() =>
@@ -64,6 +66,7 @@ namespace ResoniteHeartRate {
                 }
 
                 _pulsoidKeyPrev = Config.GetValue(_pulsoidKey);
+                _pulsoidResolvedToken = null; // re-resolve the widget URL/ID -> token
                 _HR = new HeartRateClient();
                 _token = _HR.HeartRateInit(_pulsoidKeyPrev, Config.GetValue(_service));
 
@@ -94,7 +97,35 @@ namespace ResoniteHeartRate {
                         _HypeRate = new HypeRateWebSocket(_HypeRateKeyPrev);
                     }
                 }
+                else if (Config.GetValue(_service) == HeartRateClient.HRService.Pulsoid) {
+                    // Free Pulsoid real-time websocket - no paid BRO plan required.
+                    // Pick up a token edited in settings without needing a respawn.
+                    string curKey = Config.GetValue(_pulsoidKey);
+                    if (curKey != _pulsoidKeyPrev) {
+                        _pulsoidKeyPrev = curKey;
+                        _pulsoidResolvedToken = null; // re-resolve the widget URL/ID -> token
+                        _PulsoidWS?.Close();
+                        _PulsoidWS = null;
+                        _pulsoidNextRetry = DateTime.MinValue; // reconnect immediately on token change
+                    }
+                    // Reconnect with backoff - hammering Pulsoid every 500ms gets the token
+                    // rate-limited (401). Only retry every _pulsoidRetrySeconds.
+                    if (_PulsoidWS == null || !_PulsoidWS.isAlive()) {
+                        if (DateTime.UtcNow >= _pulsoidNextRetry) {
+                            // Accept a widget URL, widget ID, or raw token in the Pulsoid Key field.
+                            // Resolve once and cache so we don't re-hit the RPC on every reconnect.
+                            if (string.IsNullOrEmpty(_pulsoidResolvedToken)) {
+                                _pulsoidResolvedToken = PulsoidTokenResolver.Resolve(_pulsoidKeyPrev);
+                            }
+                            _PulsoidWS?.Close();
+                            _PulsoidWS = new PulsoidWebSocket(_pulsoidResolvedToken);
+                            _pulsoidNextRetry = DateTime.UtcNow.AddSeconds(_pulsoidRetrySeconds);
+                        }
+                    }
+                    hearRate = _PulsoidWS?.getHeartRate() ?? 0;
+                }
                 else if (_HR != null) {
+                    // Debug_Values service path (synthetic heart rate).
                     hearRate = _HR.ReadCurrentHR(_pulsoidKeyPrev, Config.GetValue(_service));
                 }
 
@@ -187,8 +218,10 @@ namespace ResoniteHeartRate {
 
                 if (Config.GetValue(_pulsoidKey) != _pulsoidKeyPrev) {
                     _pulsoidKeyPrev = Config.GetValue(_pulsoidKey);
-                    _HR.HeartRateInit(_pulsoidKeyPrev, Config.GetValue(_service));
-
+                    _pulsoidResolvedToken = null; // re-resolve the widget URL/ID -> token
+                    // Force the Pulsoid websocket to reconnect with the new token.
+                    _PulsoidWS?.Close();
+                    _PulsoidWS = null;
                 }
 
                 if (Config.GetValue(_HypeRateKey) != _HypeRateKeyPrev) {
@@ -203,7 +236,10 @@ namespace ResoniteHeartRate {
                     _HypeRate = null;
                 }
 
-                _HRLoop.Start();
+                if (Config.GetValue(_service) != HeartRateClient.HRService.Pulsoid) {
+                    _PulsoidWS?.Close();
+                    _PulsoidWS = null;
+                }
 
 
             }
@@ -233,10 +269,16 @@ namespace ResoniteHeartRate {
 
         private static string _token = "";
         private static string _pulsoidKeyPrev = "";
+        // Cached access token resolved from whatever the user pasted (widget URL / ID / token).
+        // Null forces PulsoidTokenResolver to run again on the next reconnect.
+        private static string _pulsoidResolvedToken = null;
         private static string _HypeRateKeyPrev = "";
 
         private static HeartRateClient _HR = new HeartRateClient();
         private static HypeRateWebSocket _HypeRate;
+        private static PulsoidWebSocket _PulsoidWS;
+        private static DateTime _pulsoidNextRetry = DateTime.MinValue;
+        private const int _pulsoidRetrySeconds = 15;
         private static Thread _HRLoop;
         private static volatile bool _stopHRThread;
         private static int _threadEndDeltay = 200;
@@ -247,6 +289,9 @@ namespace ResoniteHeartRate {
 
         [AutoRegisterConfigKey]
         private static readonly ModConfigurationKey<bool> _enabled = new ModConfigurationKey<bool>("enabled", "Enabled (Require Respawn for changing some settings)", () => true);
+
+        [AutoRegisterConfigKey]
+        public static readonly ModConfigurationKey<dummy> _d34 = new ModConfigurationKey<dummy>(nameGenerator(34), "Dalek Fork (adds free Pulsoid websocket): https://github.com/dalekcoffee/ResoniteHeartRate");
 
         [AutoRegisterConfigKey]
         public static readonly ModConfigurationKey<dummy> _d29 = new ModConfigurationKey<dummy>(nameGenerator(29), "");
@@ -271,10 +316,10 @@ namespace ResoniteHeartRate {
         public static readonly ModConfigurationKey<dummy> _d31 = new ModConfigurationKey<dummy>(nameGenerator(31), "");
 
         [AutoRegisterConfigKey]
-        public static readonly ModConfigurationKey<string> _pulsoidKey = new ModConfigurationKey<string>("Pulsoid Key", "Pulsoid Key", () => "");
+        public static readonly ModConfigurationKey<string> _pulsoidKey = new ModConfigurationKey<string>("Pulsoid Key", "Pulsoid widget URL, widget ID, or access token", () => "");
 
         [AutoRegisterConfigKey]
-        public static readonly ModConfigurationKey<dummy> _d0 = new ModConfigurationKey<dummy>(nameGenerator(0), "Get your pulsoid Key from https://pulsoid.net");
+        public static readonly ModConfigurationKey<dummy> _d0 = new ModConfigurationKey<dummy>(nameGenerator(0), "Paste your widget URL (pulsoid.net/widget/view/...) - the token is fetched for you");
 
         [AutoRegisterConfigKey]
         public static readonly ModConfigurationKey<dummy> _d1 = new ModConfigurationKey<dummy>(nameGenerator(1), "");
